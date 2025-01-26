@@ -5,16 +5,26 @@
 #include <winsock2.h>
 #include <string.h>
 #include <time.h>
+#include <assert.h>
+#include <dirent.h>
 
 #define MAX_SOCKETS 60
+#define EMPTY  0
 #define LISTEN 1
 #define RECEIVE 2
+#define IDLE  3
 #define SEND 4
+
 #define SEND_TIME 1
 #define SEND_SECONDS 2
-#define EMPTY  0
-#define IDLE  3
+
+#define SEND_FILE 200
+#define SEND_NOT_SUPPORTED 400
+#define SEND_FILE_NOT_FOUND 404
+#define SEND_DIRECTORY_NOT_FOUND 500
+
 #define TIME_PORT  27015
+#define INITIAL_BUFFER_SIZE 1024
 
 
 struct SocketState {
@@ -22,7 +32,8 @@ struct SocketState {
     int recv;             // Receiving?
     int send;             // Sending?
     int sendSubType;      // Sending sub-type
-    char buffer[128];
+ //   int msgType;          // plain text or html
+    char *buffer;
     int len;
 };
 
@@ -31,6 +42,13 @@ void removeSocket(int index);
 void acceptConnection(int index);
 void receiveMessage(int index);
 void sendMessage(int index);
+char *readFile(char *filename);
+void expandBuffer(int index);
+int handleHttpGet(int index);
+int handleHttpDelete(int index);
+char *fetchFile(char* name);
+void wrapSendBuffInHTML(char **sendbuff);
+boolean checkForAnError(int bytesResult, char* ErrorAt, SOCKET socket_1, SOCKET socket_2);
 struct sockaddr_in serverService;
 struct SocketState sockets[MAX_SOCKETS] = { 0 };
 int socketsCount = 0;
@@ -84,7 +102,7 @@ int main() {
 		// select returns the number of descriptors which are ready for use (use FD_ISSET
 		// macro to check which descriptor in each set is ready to be used).
 
-		// initialize recv socket set
+		// initialize Recv socket set
         fd_set waitRecv;
         FD_ZERO(&waitRecv);
         // fill set with available listen and receive sockets
@@ -93,7 +111,7 @@ int main() {
                 FD_SET(sockets[i].id, &waitRecv);
         }
 
-        // initialize recv socket set
+        // initialize Send socket set
         fd_set waitSend;
         FD_ZERO(&waitSend);
         // fill set with available send sockets
@@ -160,6 +178,12 @@ int addSocket(SOCKET id, int what) {
             sockets[i].id = id;
             sockets[i].recv = what;
             sockets[i].send = IDLE;
+            // allocate initial memory
+            sockets[i].buffer = (char *)malloc(INITIAL_BUFFER_SIZE);
+            if (sockets[i].buffer == NULL) {
+                perror("Failed to allocate memory for buffer");
+                exit(EXIT_FAILURE);
+            }
             sockets[i].len = 0;
             socketsCount++;
             return 1;
@@ -168,12 +192,13 @@ int addSocket(SOCKET id, int what) {
     return 0;
 }
 
+// terminate socket
 void removeSocket(int index) {
     sockets[index].recv = EMPTY;
     sockets[index].send = EMPTY;
     socketsCount--;
 }
-
+// accept new client connection
 void acceptConnection(int index) {
     SOCKET id = sockets[index].id;
     struct sockaddr_in from;    // Address of sending partner
@@ -199,72 +224,203 @@ void acceptConnection(int index) {
 }
 
 void receiveMessage(int index) {
+
     SOCKET msgSocket = sockets[index].id;
+    int bytesRecv;
+    int firstRun = 0; // 0 for true
     int len = sockets[index].len;
-    int bytesRecv = recv(msgSocket, &sockets[index].buffer[len], sizeof(sockets[index].buffer) - len, 0);
 
-    if (SOCKET_ERROR == bytesRecv) {
-        printf("Time Server: Error at recv(): %d\n", WSAGetLastError());
-        closesocket(msgSocket);
-        removeSocket(index);
-        return;
-    }
-    if (bytesRecv == 0) {
-        closesocket(msgSocket);
-        removeSocket(index);
-        return;
-    }
-
-    sockets[index].buffer[len + bytesRecv] = '\0';
-    printf("Time Server: Received: %d bytes of \"%s\" message.\n", bytesRecv, &sockets[index].buffer[len]);
-
-    sockets[index].len += bytesRecv;
-
-    // parse received message
-    if (strncmp(sockets[index].buffer, "GET", 3) == 0)
-        handleHttpGet();
-    if (strncmp(sockets[index].buffer, "DELETE", 6) == 0)
-        handleHttpDelete();
-}
-
-  //  if (sockets[index].len > 0) {
-  //    printf("%s", sockets[index].buffer);
-  //  }
-
-    /*
-    if (sockets[index].len > 0) {
-        if (strncmp(sockets[index].buffer, "TimeString", 10) == 0) {
-            sockets[index].send = SEND;
-            sockets[index].sendSubType = SEND_TIME;
-            memmove(sockets[index].buffer, &sockets[index].buffer[10], sockets[index].len - 10);
-            sockets[index].len -= 10;
-        } else if (strncmp(sockets[index].buffer, "SecondsSince1970", 16) == 0) {
-            sockets[index].send = SEND;
-            sockets[index].sendSubType = SEND_SECONDS;
-            memmove(sockets[index].buffer, &sockets[index].buffer[16], sockets[index].len - 16);
-            sockets[index].len -= 16;
-        } else if (strncmp(sockets[index].buffer, "Exit", 4) == 0) {
-            printf("closing connection with socket at index %d\n",index);
+    // make sure there is enough space in the buffer
+    int remainingSize = INITIAL_BUFFER_SIZE - len;
+    while (1) {
+        if (remainingSize <= 0) {
+            // expand the buffer if it's full
+            expandBuffer(index);
+            remainingSize = INITIAL_BUFFER_SIZE;
+                }
+        // save socket data into buffer
+        bytesRecv = recv(msgSocket, &sockets[index].buffer[sockets[index].len], remainingSize, 0);
+        // connection error, terminate the socket.
+        if (bytesRecv == SOCKET_ERROR && firstRun == 0) {
+            printf("Time Server: Error at recv(): %d\n", WSAGetLastError());
             closesocket(msgSocket);
             removeSocket(index);
+            return;
+                }
+        else
+        if (bytesRecv == 0) {
+            closesocket(msgSocket);
+            removeSocket(index);
+            return;
+                }
+        else{
+            firstRun = 1;
+            // update socket buffer length
+            sockets[index].len += bytesRecv;
+            // update remaining size in buffer
+            remainingSize = INITIAL_BUFFER_SIZE - bytesRecv;
+            // partial receive means end of data
+            if (bytesRecv < remainingSize) {
+                sockets[index].buffer[len] = '\0';
+                printf("Files Server: Received: %d bytes of \"%s\" message.\n", bytesRecv, &sockets[index].buffer[len]);
+                break;
+                }
+            }
         }
-    }*/
-//}
+
+    // parse received message
+    // check if its a GET or DELETE request
+    if (strncmp(sockets[index].buffer, "GET", 3) == 0){
+            int parse = handleHttpGet(index);
+
+            // set type of message to be sent
+            if(parse == SEND_FILE)
+                    sockets[index].sendSubType = SEND_FILE;
+            else if(parse == SEND_FILE_NOT_FOUND)
+                    sockets[index].sendSubType = SEND_FILE_NOT_FOUND;
+            else if(parse == SEND_DIRECTORY_NOT_FOUND)
+                    sockets[index].sendSubType = SEND_DIRECTORY_NOT_FOUND;
+            else if (parse == SEND_NOT_SUPPORTED)
+                    sockets[index].sendSubType = SEND_NOT_SUPPORTED;
+
+            // set socket to be a Send Socket
+            sockets[index].recv = IDLE;
+            sockets[index].send = SEND;
+    }
+    else if(strncmp(sockets[index].buffer, "DELETE", 6) == 0)
+            handleHttpDelete(index);
+            // NOT FINISHED!!!!!!!!!!!!!!!!!!!!
+            // DO ALMOST SAME AS THE GET
+
+    else{
+        // set socket to be  a Send Socket
+        sockets[index].recv = IDLE;
+        sockets[index].send = SEND;
+        // set type of message to be sent
+        sockets[index].sendSubType = SEND_NOT_SUPPORTED;
+        }
+
+}
+
+int handleHttpGet(int index){
+
+    SOCKET msgSocket = sockets[index].id;
+    char* sendBuff;
+    char* requestLine = strtok(sockets[index].buffer, "\r\n"); // extract the request line
+
+    // deal with unsupported requests
+    if (requestLine == NULL)
+        return SEND_NOT_SUPPORTED;
+
+    // parse the GET request
+    char* method = strtok(requestLine, " ");      // extract the HTTP method
+    char* path = strtok(NULL, " ");               // extract the path
+    printf("DEBUG : %s",method);
+    printf("DEBUG : %s",path);
+
+    if (method == NULL || path == NULL)
+        return SEND_NOT_SUPPORTED;
+
+    // remove leading slash from path
+    if (path[0] == '/')
+        path++;
+
+    if (strcmp(fetchFile(path), "Directory Not Found") == 0){
+        return SEND_DIRECTORY_NOT_FOUND;
+    }
+    else
+        if (strcmp(fetchFile(path), "File Not Found") == 0)
+            return SEND_FILE_NOT_FOUND;
+        else{
+            // clear previous allocated memory when receiving msgsocket
+            free(sockets[index].buffer);
+            // set buffer data to the file contents
+            sockets[index].buffer = fetchFile(path);
+            // add <html><body> to start and end
+            wrapSendBuffInHTML(&sockets[index].buffer);
+            sockets[index].len = strlen(sockets[index].buffer);
+            return SEND_FILE;
+            }
+}
+
+char *fetchFile(char *name){
+
+    DIR *folder;
+    struct dirent *entry;
+    folder = opendir("Files");
+    int available = 0;
+    int files = 0;
+
+    if(folder == NULL)
+    {
+        return "Directory Not Found";
+    }
+
+    while((entry=readdir(folder)) )
+    {
+        files++;
+        char *fileName = entry->d_name;
+        if(strcmp(name, entry->d_name)==0){
+            size_t filePathSize = strlen("Files/") + strlen(fileName) + 1;
+            char *filePath = (char *)malloc(filePathSize);
+            snprintf(filePath, filePathSize, "Files/%s", fileName);
+            available = 1;
+            free(filePath); // free the dynamically allocated file path
+            filePath = NULL;
+            return readFile(filePath);
+        }
+    }
+    if(available == 0){
+            return "File Not Found";
+        }
+
+    closedir(folder);
+}
 
 void sendMessage(int index) {
     int bytesSent;
-    char sendBuff[255];
-
     SOCKET msgSocket = sockets[index].id;
-    if (sockets[index].sendSubType == SEND_TIME) {
-        time_t timer;
-        time(&timer);
-        strcpy(sendBuff, ctime(&timer));
-        sendBuff[strlen(sendBuff) - 1] = '\0';
-    } else if (sockets[index].sendSubType == SEND_SECONDS) {
-        time_t timer;
-        time(&timer);
-        sprintf(sendBuff, "%ld", timer);
+    const char *httpHeader = "HTTP/1.1 200 OK\r\n"
+                             "Content-Type: text/html\r\n"
+                             "Content-Length: %d\r\n"
+                             "Connection: keep-alive\r\n\r\n%s";
+    const char *htmlStart = "<html><body>";
+    const char *htmlEnd = "</body></html>";
+    int length = strlen(httpHeader) + strlen(htmlStart) + strlen(htmlEnd) + 1;
+
+
+
+    // look for relevant socket type and send message
+    if (sockets[index].sendSubType == SEND_FILE) {
+        int contentLength = sockets[index].len;
+        snprintf(sendBuff, sizeof(sendBuff),
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Type: text/html\r\n"
+                 "Content-Length: %d\r\n"
+                 "Connection: keep-alive\r\n\r\n%s",
+                 contentLength, sendBuff);
+    }else if (sockets[index].sendSubType == SEND_NOT_SUPPORTED) {
+        snprintf(sendBuff, sizeof(sendBuff),
+                 "HTTP/1.1 400 Bad Request\r\n"
+                 "Content-Type: text/html\r\n"
+                 "Content-Length: %d\r\n"
+                 "Connection: keep-alive\r\n\r\n"
+                 "Invalid HTTP Request");
+        bytesSent = send(msgSocket, sendBuff, strlen(sendBuff), 0);
+    } else if (sockets[index].sendSubType == SEND_FILE_NOT_FOUND) {
+        snprintf(sendBuff, sizeof(sendBuff),
+                "HTTP/1.1 404 Not Found\r\n"
+                "Content-Type: text/html\r\n"
+                "Connection: keep-alive\r\n\r\n"
+                "File not found");
+        bytesSent = send(msgSocket, sendBuff, strlen(sendBuff), 0);
+    }else if (sockets[index].sendSubType == SEND_DIRECTORY_NOT_FOUND) {
+        snprintf(sendBuff, sizeof(sendBuff),
+                "HTTP/1.1 500 Internal Server Error\r\n"
+                "Content-Type: text/html\r\n"
+                "Connection: keep-alive\r\n\r\n"
+                "Error reading file");
+        bytesSent = send(msgSocket, sendBuff, strlen(sendBuff), 0);
     }
 
     bytesSent = send(msgSocket, sendBuff, (int)strlen(sendBuff), 0);
@@ -275,5 +431,59 @@ void sendMessage(int index) {
 
     printf("Time Server: Sent: %d\\%lu bytes of \"%s\" message.\n", bytesSent, strlen(sendBuff), sendBuff);
 
+    // update socket mode to Recv
     sockets[index].send = IDLE;
+    sockets[index].recv = RECEIVE;
 }
+
+char *readFile(char *filename) {
+     FILE *f = fopen(filename, "rt");
+     assert(f);
+     fseek(f, 0, SEEK_END);
+     long length = ftell(f);
+     fseek(f, 0, SEEK_SET);
+     char *buffer = (char *) malloc(length + 1);
+     buffer[length] = '\0';
+     fread(buffer, 1, length, f);
+     fclose(f);
+     return buffer;
+}
+
+bool checkForAnError(int bytesResult, char* ErrorAt, SOCKET socket_1, SOCKET socket_2) {
+    if (SOCKET_ERROR == bytesResult) {
+        int errorCode = WSAGetLastError();
+        printf("Files Server: Error at %s(): %d\n", ErrorAt, errorCode);
+        closesocket(socket_2);
+
+        // Handle specific errors
+        if (errorCode == WSAECONNRESET) {
+            printf("Client closed the connection suddenly\n");
+        }else{
+                closesocket(socket_1);
+                WSACleanup();
+        }
+
+        return true; // Indicate an error occurred
+    }
+
+    return false; // No error detected
+}
+
+// expand socket buffer
+void expandBuffer(int index) {
+
+    int newSize = INITIAL_BUFFER_SIZE + sockets[index].len; // increase buffer size
+    char *newBuffer = (char *)realloc(sockets[index].buffer, newSize);
+    if (newBuffer == NULL) {
+        perror("Failed to expand buffer");
+        free(sockets[index].buffer);
+        sockets[index].buffer = NULL;
+        exit(EXIT_FAILURE);
+    }
+    sockets[index].buffer = newBuffer;
+    sockets[index].len = newSize; // Update the buffer size
+    printf("Recv Buffer expanded to %d bytes.\n", newSize);
+
+}
+
+
