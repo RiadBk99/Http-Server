@@ -46,7 +46,7 @@ char *readFile(char *filename);
 void expandBuffer(int index);
 int handleHttpGet(int index);
 int handleHttpDelete(int index);
-char *fetchFile(char* name);
+char *fetchFile(char* name, int index);
 void wrapSendBuffInHTML(char **sendbuff);
 boolean checkForAnError(int bytesResult, char* ErrorAt, SOCKET socket_1, SOCKET socket_2);
 struct sockaddr_in serverService;
@@ -206,15 +206,15 @@ void acceptConnection(int index) {
 
     SOCKET msgSocket = accept(id, (struct sockaddr*)&from, &fromLen);
     if (INVALID_SOCKET == msgSocket) {
-        printf("Time Server: Error at accept(): %d\n", WSAGetLastError());
+        printf("Files Server: Error at accept(): %d\n", WSAGetLastError());
         return;
     }
-    printf("Time Server: Client %s:%d is connected.\n", inet_ntoa(from.sin_addr), ntohs(from.sin_port));
+    printf("Files Server: Client %s:%d is connected.\n", inet_ntoa(from.sin_addr), ntohs(from.sin_port));
 
 	// Set the socket to be in non-blocking mode.
     unsigned long flag = 1;
     if (ioctlsocket(msgSocket, FIONBIO, &flag) != 0) {
-        printf("Time Server: Error at ioctlsocket(): %d\n", WSAGetLastError());
+        printf("Files Server: Error at ioctlsocket(): %d\n", WSAGetLastError());
     }
 
     if (!addSocket(msgSocket, RECEIVE)) {
@@ -247,26 +247,32 @@ void receiveMessage(int index) {
             removeSocket(index);
             return;
                 }
-        else
-        if (bytesRecv == 0) {
+        if (bytesRecv == 0 && firstRun == 0) {
+            printf("Client disconnected.\n");
             closesocket(msgSocket);
             removeSocket(index);
             return;
                 }
-        else{
+
+        if(bytesRecv>0){
+
+            // update flag
             firstRun = 1;
+
             // update socket buffer length
             sockets[index].len += bytesRecv;
-            // update remaining size in buffer
-            remainingSize = INITIAL_BUFFER_SIZE - bytesRecv;
+
             // partial receive means end of data
-            if (bytesRecv < remainingSize) {
-                sockets[index].buffer[len] = '\0';
+            if (bytesRecv <= remainingSize) {
+                sockets[index].buffer[sockets[index].len] = '\0';
                 printf("Files Server: Received: %d bytes of \"%s\" message.\n", bytesRecv, &sockets[index].buffer[len]);
                 break;
                 }
+            // update remaining size
+            remainingSize = remainingSize - bytesRecv;
             }
         }
+
 
     // parse received message
     // check if its a GET or DELETE request
@@ -288,7 +294,8 @@ void receiveMessage(int index) {
             sockets[index].send = SEND;
     }
     else if(strncmp(sockets[index].buffer, "DELETE", 6) == 0)
-            handleHttpDelete(index);
+            printf("reached delete");
+            //  handleHttpDelete(index);
             // NOT FINISHED!!!!!!!!!!!!!!!!!!!!
             // DO ALMOST SAME AS THE GET
 
@@ -304,8 +311,6 @@ void receiveMessage(int index) {
 
 int handleHttpGet(int index){
 
-    SOCKET msgSocket = sockets[index].id;
-    char* sendBuff;
     char* requestLine = strtok(sockets[index].buffer, "\r\n"); // extract the request line
 
     // deal with unsupported requests
@@ -315,40 +320,33 @@ int handleHttpGet(int index){
     // parse the GET request
     char* method = strtok(requestLine, " ");      // extract the HTTP method
     char* path = strtok(NULL, " ");               // extract the path
-    printf("DEBUG : %s",method);
-    printf("DEBUG : %s",path);
 
+    // deal with unsupported requests
     if (method == NULL || path == NULL)
         return SEND_NOT_SUPPORTED;
 
     // remove leading slash from path
     if (path[0] == '/')
         path++;
+    printf("\nFetching file name : %s\n", path);
 
-    if (strcmp(fetchFile(path), "Directory Not Found") == 0){
+    char *result = fetchFile(path, index);
+    if (strcmp(result, "Directory Not Found") == 0) {
         return SEND_DIRECTORY_NOT_FOUND;
-    }
-    else
-        if (strcmp(fetchFile(path), "File Not Found") == 0)
+
+        } else if (strcmp(result, "File Not Found") == 0) {
             return SEND_FILE_NOT_FOUND;
-        else{
-            // clear previous allocated memory when receiving msgsocket
-            free(sockets[index].buffer);
-            // set buffer data to the file contents
-            sockets[index].buffer = fetchFile(path);
-            // add <html><body> to start and end
-            wrapSendBuffInHTML(&sockets[index].buffer);
-            sockets[index].len = strlen(sockets[index].buffer);
-            return SEND_FILE;
-            }
+
+            } else if (strcmp(result,"Send File") == 0)
+                return SEND_FILE;
+
 }
 
-char *fetchFile(char *name){
+char *fetchFile(char *name, int index){
 
     DIR *folder;
     struct dirent *entry;
     folder = opendir("Files");
-    int available = 0;
     int files = 0;
 
     if(folder == NULL)
@@ -361,81 +359,99 @@ char *fetchFile(char *name){
         files++;
         char *fileName = entry->d_name;
         if(strcmp(name, entry->d_name)==0){
+
+            // build the file path
             size_t filePathSize = strlen("Files/") + strlen(fileName) + 1;
             char *filePath = (char *)malloc(filePathSize);
             snprintf(filePath, filePathSize, "Files/%s", fileName);
-            available = 1;
-            free(filePath); // free the dynamically allocated file path
+
+            //read file content
+            free(sockets[index].buffer);
+            sockets[index].buffer = readFile(filePath);
+            sockets[index].len = strlen(sockets[index].buffer);
+
+            // free memory & close folder
+            free(filePath);
             filePath = NULL;
-            return readFile(filePath);
+            closedir(folder);
+
+            return "Send File";
         }
     }
-    if(available == 0){
-            return "File Not Found";
-        }
 
-    closedir(folder);
+    closedir(folder); //cClose the directory
+    return "File Not Found";
+
 }
+
 
 void sendMessage(int index) {
     int bytesSent;
     SOCKET msgSocket = sockets[index].id;
-    const char *httpHeader = "HTTP/1.1 200 OK\r\n"
-                             "Content-Type: text/html\r\n"
-                             "Content-Length: %d\r\n"
-                             "Connection: keep-alive\r\n\r\n%s";
     const char *htmlStart = "<html><body>";
     const char *htmlEnd = "</body></html>";
-    int length = strlen(httpHeader) + strlen(htmlStart) + strlen(htmlEnd) + 1;
 
-
+    expandBuffer(index);
 
     // look for relevant socket type and send message
     if (sockets[index].sendSubType == SEND_FILE) {
-        int contentLength = sockets[index].len;
-        snprintf(sendBuff, sizeof(sendBuff),
+        printf("SENDING FILE\n");
+        int contentLength = strlen(htmlStart) + sockets[index].len + strlen(htmlEnd);
+        snprintf(sockets[index].buffer, sizeof(sockets[index].buffer),
                  "HTTP/1.1 200 OK\r\n"
                  "Content-Type: text/html\r\n"
                  "Content-Length: %d\r\n"
-                 "Connection: keep-alive\r\n\r\n%s",
-                 contentLength, sendBuff);
+                 "Connection: keep-alive\r\n\r\n%s%s%s",
+                 contentLength, htmlStart, sockets[index].buffer ,htmlEnd);
+                 bytesSent = send(msgSocket, sockets[index].buffer, strlen(sockets[index].buffer), 0);
+
     }else if (sockets[index].sendSubType == SEND_NOT_SUPPORTED) {
-        snprintf(sendBuff, sizeof(sendBuff),
-                 "HTTP/1.1 400 Bad Request\r\n"
-                 "Content-Type: text/html\r\n"
-                 "Content-Length: %d\r\n"
-                 "Connection: keep-alive\r\n\r\n"
-                 "Invalid HTTP Request");
-        bytesSent = send(msgSocket, sendBuff, strlen(sendBuff), 0);
+        printf("SENDING NOT SUPPORTED\n");
+            int contentLength = strlen("Invalid HTTP Request");
+            snprintf(sockets[index].buffer, sizeof(sockets[index].buffer),
+                     "HTTP/1.1 400 Bad Request\r\n"
+                     "Content-Type: text/html\r\n"
+                     "Content-Length: %d\r\n"
+                     "Connection: keep-alive\r\n\r\n"
+                     "%sInvalid HTTP Request%s",
+                     contentLength,htmlStart,htmlEnd);
+                    bytesSent = send(msgSocket, sockets[index].buffer, strlen(sockets[index].buffer), 0);
     } else if (sockets[index].sendSubType == SEND_FILE_NOT_FOUND) {
-        snprintf(sendBuff, sizeof(sendBuff),
+        printf("SENDING FILE NOT FOUND\n");
+        int contentLength = strlen("File not found");
+        snprintf(sockets[index].buffer, sizeof(sockets[index].buffer),
                 "HTTP/1.1 404 Not Found\r\n"
                 "Content-Type: text/html\r\n"
+                "Content-Length: %d\r\n"
                 "Connection: keep-alive\r\n\r\n"
-                "File not found");
-        bytesSent = send(msgSocket, sendBuff, strlen(sendBuff), 0);
+                "%sFile not found%s",
+                contentLength,htmlStart,htmlEnd);
+                bytesSent = send(msgSocket, sockets[index].buffer, strlen(sockets[index].buffer), 0);
     }else if (sockets[index].sendSubType == SEND_DIRECTORY_NOT_FOUND) {
-        snprintf(sendBuff, sizeof(sendBuff),
+        printf("SENDING INTERNAL ERROR\n");
+        int contentLength = strlen("Error reading file");
+        snprintf(sockets[index].buffer, sizeof(sockets[index].buffer),
                 "HTTP/1.1 500 Internal Server Error\r\n"
                 "Content-Type: text/html\r\n"
+                "Content-Length: %d\r\n"
                 "Connection: keep-alive\r\n\r\n"
-                "Error reading file");
-        bytesSent = send(msgSocket, sendBuff, strlen(sendBuff), 0);
+                "%sError reading file%s",
+                contentLength,htmlStart,htmlEnd);
+                bytesSent = send(msgSocket, sockets[index].buffer, strlen(sockets[index].buffer), 0);
     }
-
-    bytesSent = send(msgSocket, sendBuff, (int)strlen(sendBuff), 0);
     if (SOCKET_ERROR == bytesSent) {
-        printf("Time Server: Error at send(): %d\n", WSAGetLastError());
+        printf("Files Server: Error at send(): %d\n", WSAGetLastError());
         return;
     }
 
-    printf("Time Server: Sent: %d\\%lu bytes of \"%s\" message.\n", bytesSent, strlen(sendBuff), sendBuff);
+    printf("Files Server: Sent: %d\\%d bytes of \"%s\" message.\n", bytesSent, strlen(sockets[index].buffer), sockets[index].buffer);
 
     // update socket mode to Recv
     sockets[index].send = IDLE;
     sockets[index].recv = RECEIVE;
 }
 
+// read file contents
 char *readFile(char *filename) {
      FILE *f = fopen(filename, "rt");
      assert(f);
@@ -449,41 +465,23 @@ char *readFile(char *filename) {
      return buffer;
 }
 
-bool checkForAnError(int bytesResult, char* ErrorAt, SOCKET socket_1, SOCKET socket_2) {
-    if (SOCKET_ERROR == bytesResult) {
-        int errorCode = WSAGetLastError();
-        printf("Files Server: Error at %s(): %d\n", ErrorAt, errorCode);
-        closesocket(socket_2);
-
-        // Handle specific errors
-        if (errorCode == WSAECONNRESET) {
-            printf("Client closed the connection suddenly\n");
-        }else{
-                closesocket(socket_1);
-                WSACleanup();
-        }
-
-        return true; // Indicate an error occurred
-    }
-
-    return false; // No error detected
-}
 
 // expand socket buffer
 void expandBuffer(int index) {
 
-    int newSize = INITIAL_BUFFER_SIZE + sockets[index].len; // increase buffer size
-    char *newBuffer = (char *)realloc(sockets[index].buffer, newSize);
+    int newSize = INITIAL_BUFFER_SIZE + sockets[index].len; // get new required size
+    char *newBuffer = (char *)realloc(sockets[index].buffer, newSize);  // allocate memory
+    // check for errors
     if (newBuffer == NULL) {
         perror("Failed to expand buffer");
         free(sockets[index].buffer);
         sockets[index].buffer = NULL;
         exit(EXIT_FAILURE);
     }
+    // set new pointer
     sockets[index].buffer = newBuffer;
-    sockets[index].len = newSize; // Update the buffer size
-    printf("Recv Buffer expanded to %d bytes.\n", newSize);
-
+    printf("Buffer expanded to %d bytes.\n", newSize);
+    printf("%s", newBuffer);
 }
 
 
