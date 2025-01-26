@@ -43,7 +43,7 @@ void acceptConnection(int index);
 void receiveMessage(int index);
 void sendMessage(int index);
 char *readFile(char *filename);
-void expandBuffer(int index);
+int expandBuffer(int index);
 int handleHttpGet(int index);
 int handleHttpDelete(int index);
 char *fetchFile(char* name, int index);
@@ -391,53 +391,69 @@ void sendMessage(int index) {
     const char *htmlStart = "<html><body>";
     const char *htmlEnd = "</body></html>";
 
-    expandBuffer(index);
+    int newSize = expandBuffer(index);
 
     // look for relevant socket type and send message
     if (sockets[index].sendSubType == SEND_FILE) {
+        printf("DEBUG BEFORE SNPRINTF BUFF CONTENTS : %s\n", sockets[index].buffer);
         printf("SENDING FILE\n");
         int contentLength = strlen(htmlStart) + sockets[index].len + strlen(htmlEnd);
-        snprintf(sockets[index].buffer, sizeof(sockets[index].buffer),
+
+        // prepare message buffer
+        snprintf(sockets[index].buffer, newSize,
                  "HTTP/1.1 200 OK\r\n"
                  "Content-Type: text/html\r\n"
                  "Content-Length: %d\r\n"
                  "Connection: keep-alive\r\n\r\n%s%s%s",
                  contentLength, htmlStart, sockets[index].buffer ,htmlEnd);
-                 bytesSent = send(msgSocket, sockets[index].buffer, strlen(sockets[index].buffer), 0);
+
+
+        // update socket length
+        sockets[index].len = strlen(sockets[index].buffer);
+
+        printf("DEBUG - BUFF LENGTH IS : %d\n", sockets[index].len);
+        printf("DEBUG AFTER SNPRINTF BUFF CONTENTS : %s\n", sockets[index].buffer);
+        // send message
+        bytesSent = send(msgSocket, sockets[index].buffer, sockets[index].len, 0);
 
     }else if (sockets[index].sendSubType == SEND_NOT_SUPPORTED) {
         printf("SENDING NOT SUPPORTED\n");
             int contentLength = strlen("Invalid HTTP Request");
-            snprintf(sockets[index].buffer, sizeof(sockets[index].buffer),
+            snprintf(sockets[index].buffer, newSize,
                      "HTTP/1.1 400 Bad Request\r\n"
                      "Content-Type: text/html\r\n"
                      "Content-Length: %d\r\n"
                      "Connection: keep-alive\r\n\r\n"
                      "%sInvalid HTTP Request%s",
                      contentLength,htmlStart,htmlEnd);
-                    bytesSent = send(msgSocket, sockets[index].buffer, strlen(sockets[index].buffer), 0);
+        bytesSent = send(msgSocket, sockets[index].buffer, strlen(sockets[index].buffer), 0);
+
+
     } else if (sockets[index].sendSubType == SEND_FILE_NOT_FOUND) {
         printf("SENDING FILE NOT FOUND\n");
         int contentLength = strlen("File not found");
-        snprintf(sockets[index].buffer, sizeof(sockets[index].buffer),
+        snprintf(sockets[index].buffer, newSize,
                 "HTTP/1.1 404 Not Found\r\n"
                 "Content-Type: text/html\r\n"
                 "Content-Length: %d\r\n"
                 "Connection: keep-alive\r\n\r\n"
                 "%sFile not found%s",
                 contentLength,htmlStart,htmlEnd);
-                bytesSent = send(msgSocket, sockets[index].buffer, strlen(sockets[index].buffer), 0);
+        bytesSent = send(msgSocket, sockets[index].buffer, strlen(sockets[index].buffer), 0);
+
+
     }else if (sockets[index].sendSubType == SEND_DIRECTORY_NOT_FOUND) {
         printf("SENDING INTERNAL ERROR\n");
         int contentLength = strlen("Error reading file");
-        snprintf(sockets[index].buffer, sizeof(sockets[index].buffer),
+        snprintf(sockets[index].buffer, newSize,
                 "HTTP/1.1 500 Internal Server Error\r\n"
                 "Content-Type: text/html\r\n"
                 "Content-Length: %d\r\n"
                 "Connection: keep-alive\r\n\r\n"
                 "%sError reading file%s",
                 contentLength,htmlStart,htmlEnd);
-                bytesSent = send(msgSocket, sockets[index].buffer, strlen(sockets[index].buffer), 0);
+        bytesSent = send(msgSocket, sockets[index].buffer, strlen(sockets[index].buffer), 0);
+
     }
     if (SOCKET_ERROR == bytesSent) {
         printf("Files Server: Error at send(): %d\n", WSAGetLastError());
@@ -467,7 +483,7 @@ char *readFile(char *filename) {
 
 
 // expand socket buffer
-void expandBuffer(int index) {
+int expandBuffer(int index) {
 
     int newSize = INITIAL_BUFFER_SIZE + sockets[index].len; // get new required size
     char *newBuffer = (char *)realloc(sockets[index].buffer, newSize);  // allocate memory
@@ -481,7 +497,7 @@ void expandBuffer(int index) {
     // set new pointer
     sockets[index].buffer = newBuffer;
     printf("Buffer expanded to %d bytes.\n", newSize);
-    printf("%s", newBuffer);
+    return newSize;
 }
 
 
