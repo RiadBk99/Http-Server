@@ -1,0 +1,7 @@
+The "Cheers" system is being developed by "Wine Ha'Emek," a wine trading company, to manage key business operations, including inventory management, customer management, and order processing and delivery.
+
+The sales staff are responsible for placing customer orders, with each order being assigned to a specific employee. Orders can be categorized as either regular or urgent and include the following details: order number, order date, current status (in process, dispatched, delivered, paid, suspended, or canceled), shipment date, and the assigned employee's information (ID, name, phone number, office address, email, and employment start date). The actual delivery of orders is managed by an external company, called "GalGalim," and falls outside the scope of the current system.
+
+Orders may consist of multiple wines in different quantities. To minimize delivery costs, customers can place joint orders. In such cases, the system must track which wines and quantities have been ordered by each customer. For each customer in an order, the system records their ID, name, phone number, delivery address, email, and the date of first contact with the company. Company employees are allowed to order wines under the same conditions as regular customers. 
+
+Urgent orders are processed with priority and must be placed by a single customer to ensure prompt delivery. When placing an urgent order, the priority level (a number between 1 and 5) and the expected delivery time must be specified.
