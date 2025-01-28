@@ -24,7 +24,7 @@
 #define SEND_REMOVED 201
 #define SEND_NOT_SUPPORTED 400
 #define SEND_FILE_NOT_FOUND 404
-#define SEND_DIRECTORY_NOT_FOUND 500
+#define SEND_INTERNAL_ERROR 500
 
 #define JSON 1
 #define ANYTHING 2
@@ -51,7 +51,8 @@ char *readFile(char *filename);
 int expandBuffer(int index);
 int handleHttpGet(int index);
 int handleHttpDelete(int index);
-void askMainServer(int index, int file);
+int askMainServer(char* name, int index);
+int saveToFile(char *name, char *content);
 char *fetchFile(char* name, int index);
 char *deleteFile(char* name, int index);
 void generateDateHeader(char* dateHeader, size_t bufferSize);
@@ -240,7 +241,7 @@ void acceptConnection(int index) {
         printf("Files Server: Error at accept(): %d\n", WSAGetLastError());
         return;
     }
-    printf("Files Server: Client %s:%d is connected.\n", inet_ntoa(from.sin_addr), ntohs(from.sin_port));
+    printf("\nFiles Server: Client %s:%d is connected.\n\n", inet_ntoa(from.sin_addr), ntohs(from.sin_port));
 
 	// Set the socket to be in non-blocking mode.
     unsigned long flag = 1;
@@ -262,6 +263,7 @@ void receiveMessage(int index) {
 
     // save socket data into buffer
     bytesRecv = recv(msgSocket, &sockets[index].buffer[sockets[index].len], INITIAL_BUFFER_SIZE, 0);
+
     // connection error, terminate the socket.
     if (bytesRecv == SOCKET_ERROR) {
         printf("Time Server: Error at recv(): %d\n", WSAGetLastError());
@@ -274,7 +276,6 @@ void receiveMessage(int index) {
         removeSocket(index);
         return;
         }
-
 
     if(bytesRecv>0){
         // update socket buffer length
@@ -295,8 +296,8 @@ void receiveMessage(int index) {
                     sockets[index].sendSubType = SEND_FILE;
             else if(parse == SEND_FILE_NOT_FOUND)
                     sockets[index].sendSubType = SEND_FILE_NOT_FOUND;
-            else if(parse == SEND_DIRECTORY_NOT_FOUND)
-                    sockets[index].sendSubType = SEND_DIRECTORY_NOT_FOUND;
+            else if(parse == SEND_INTERNAL_ERROR)
+                    sockets[index].sendSubType = SEND_INTERNAL_ERROR;
             else if (parse == SEND_NOT_SUPPORTED)
                     sockets[index].sendSubType = SEND_NOT_SUPPORTED;
 
@@ -312,8 +313,8 @@ void receiveMessage(int index) {
                     sockets[index].sendSubType = SEND_REMOVED;
             else if(parse == SEND_FILE_NOT_FOUND)
                     sockets[index].sendSubType = SEND_FILE_NOT_FOUND;
-            else if(parse == SEND_DIRECTORY_NOT_FOUND)
-                    sockets[index].sendSubType = SEND_DIRECTORY_NOT_FOUND;
+            else if(parse == SEND_INTERNAL_ERROR)
+                    sockets[index].sendSubType = SEND_INTERNAL_ERROR;
             else if (parse == SEND_NOT_SUPPORTED)
                     sockets[index].sendSubType = SEND_NOT_SUPPORTED;
 
@@ -352,24 +353,16 @@ int handleHttpGet(int index){
         path++;
     printf("\nFetching file named : %s\n", path);
 
-    if (strcmp(path, "json") == 0){
-        askMainServer(index, JSON);
-        return SEND_FILE;
-    }
-    if (strcmp(path, "anything") == 0){
-        askMainServer(index, ANYTHING);
-        return SEND_FILE;
-    }
-
     char *result = fetchFile(path, index);
-    if (strcmp(result, "Directory Not Found") == 0) {
-        return SEND_DIRECTORY_NOT_FOUND;
+    if (strcmp(result, "Internal Error") == 0) {
+        return SEND_INTERNAL_ERROR;
 
         } else if (strcmp(result, "File Not Found") == 0) {
             return SEND_FILE_NOT_FOUND;
 
             } else if (strcmp(result,"Send File") == 0)
                 return SEND_FILE;
+                else return SEND_INTERNAL_ERROR;
 
 }
 
@@ -399,13 +392,14 @@ int handleHttpDelete(int index){
     printf("%s\n", result);
 
     if (strcmp(result, "Directory Not Found") == 0) {
-        return SEND_DIRECTORY_NOT_FOUND;
+        return SEND_INTERNAL_ERROR;
 
         } else if (strcmp(result, "File Not Found") == 0) {
             return SEND_FILE_NOT_FOUND;
 
             } else if (strcmp(result,"File Removed") == 0)
                 return SEND_REMOVED;
+                else return SEND_INTERNAL_ERROR;
 
 }
 
@@ -419,14 +413,20 @@ char *fetchFile(char *name, int index){
 
     if(folder == NULL)
     {
-        return "Directory Not Found";
+        return "Internal Error";
+    }
+
+    // make file name with .txt
+    char tmpName[1028];
+    if (strcmp(name, "json") == 0 || strcmp(name, "anything") == 0){
+        snprintf(tmpName, sizeof(tmpName), "%s.txt", name);
     }
 
     while((entry=readdir(folder)) )
     {
         files++;
         char *fileName = entry->d_name;
-        if(strcmp(name, entry->d_name)==0){
+        if(strcmp(name, entry->d_name)==0 || strcmp(tmpName, entry->d_name) == 0){
 
             // build the file path
             size_t filePathSize = strlen("Files/") + strlen(fileName) + 1;
@@ -446,8 +446,15 @@ char *fetchFile(char *name, int index){
             return "Send File";
         }
     }
-
     closedir(folder); //close the directory
+
+    // these are the available files at the main server
+    if ((strcmp(name, "json") == 0) || (strcmp(name, "anything") == 0)){
+        if(askMainServer(name, index)== SEND_INTERNAL_ERROR)
+            return "Internal Error";
+        return "Send File";
+    }
+
     return "File Not Found";
 
 }
@@ -495,9 +502,8 @@ char *deleteFile(char *name, int index){
 
 }
 
-void askMainServer(int index , int file){
+int askMainServer(char *name, int index){
 
- //   WSADATA wsaData;
     LARGE_INTEGER start,end;
     double duration;
     SOCKET sockfd;
@@ -515,8 +521,7 @@ void askMainServer(int index , int file){
     // resolve domain name to IP
     if ((rv = getaddrinfo(inputVal, "80", &hints, &results)) != 0) {
         printf("getaddrinfo failed: %s\n", gai_strerrorA(rv));
-        WSACleanup();
-        return;
+        return SEND_INTERNAL_ERROR;
     }
 
     // create socket
@@ -524,7 +529,7 @@ void askMainServer(int index , int file){
     if (sockfd == INVALID_SOCKET) {
         printf("Socket creation failed. Error Code: %d\n", WSAGetLastError());
         freeaddrinfo(results);
-        return;
+        return SEND_INTERNAL_ERROR;
     }
 
     // start timer
@@ -535,21 +540,18 @@ void askMainServer(int index , int file){
         printf("Connection failed. Error Code: %d\n", WSAGetLastError());
         closesocket(sockfd);
         freeaddrinfo(results);
-        return;
+        return SEND_INTERNAL_ERROR;
     }
 
     char httpRequest[256];
 
-    if(file == JSON)
-        snprintf(httpRequest, sizeof(httpRequest), "GET /json HTTP/1.0\r\nHost: %s\r\n\r\n", inputVal);
-    if(file == ANYTHING)
-        snprintf(httpRequest, sizeof(httpRequest), "GET /anything HTTP/1.0\r\nHost: %s\r\n\r\n", inputVal);
+    snprintf(httpRequest, sizeof(httpRequest), "GET /%s HTTP/1.0\r\nHost: %s\r\n\r\n", name,inputVal);
     printf("\n****Sending request to main server : %s\n", httpRequest);
     if (send(sockfd, httpRequest, (int)strlen(httpRequest), 0) == SOCKET_ERROR) {
         printf("Send failed. Error Code: %d\n", WSAGetLastError());
         closesocket(sockfd);
         freeaddrinfo(results);
-        return;
+        return SEND_INTERNAL_ERROR; // internal failure
     }
 
     // receive response
@@ -562,7 +564,7 @@ void askMainServer(int index , int file){
 
     // loop to receive data
     while ((bytesrecv = recv(sockfd, buffer, INITIAL_BUFFER_SIZE - 1, 0)) > 0) {
-        buffer[bytesrecv] = '\0'; // Null-terminate the received chunk
+        buffer[bytesrecv] = '\0'; // null-terminate the received chunk
 
         if (!headerEnd) {
             // check for the end of the headers (\r\n\r\n)
@@ -576,7 +578,9 @@ void askMainServer(int index , int file){
                 tmpBuffer = (char *)malloc(bodyChunkLength + 1);
                 if (!tmpBuffer) {
                     perror("Failed to allocate memory for the response body");
-                    return;
+                    closesocket(sockfd);
+                    freeaddrinfo(results);
+                    return SEND_INTERNAL_ERROR; // internal failure
                 }
                 strcpy(tmpBuffer, bodyStart);
                 totalBodyLength = bodyChunkLength;
@@ -586,7 +590,9 @@ void askMainServer(int index , int file){
             tmpBuffer = (char *)realloc(tmpBuffer, totalBodyLength + bytesrecv + 1);
             if (!tmpBuffer) {
                 perror("Failed to reallocate memory for the response body");
-                return;
+                closesocket(sockfd);
+                freeaddrinfo(results);
+                return SEND_INTERNAL_ERROR ;
             }
             // append the new chunk to the body
             strncat(tmpBuffer, buffer, bytesrecv);
@@ -598,13 +604,19 @@ void askMainServer(int index , int file){
     if (tmpBuffer) {
         tmpBuffer[totalBodyLength] = '\0';
         printf("\n****BODY RECEIVED FROM MAIN SERVER : \n %s\n", tmpBuffer);
-
-        // if you want to store the body in sockets[index].buffer
+        // save copy of the file in local server database
+        if(saveToFile(name, tmpBuffer) == SEND_INTERNAL_ERROR){
+            free(sockets[index].buffer);
+            closesocket(sockfd);
+            freeaddrinfo(results);
+            return SEND_INTERNAL_ERROR;
+        }
+        // store the body in sockets[index].buffer
         free(sockets[index].buffer);
         sockets[index].buffer = tmpBuffer;
         sockets[index].len = totalBodyLength;
     } else {
-        printf("No body received.\n");
+        printf("****NO BODY RECEIVED FROM MAIN SERVER****\n");
     }
     QueryPerformanceCounter(&end);
     duration = (double)(end.QuadPart - start.QuadPart) / frequency.QuadPart;
@@ -612,9 +624,44 @@ void askMainServer(int index , int file){
 
     // check for errors or connection closure
     if (bytesrecv < 0) {
-        perror("Error receiving data");
+        perror("Error receiving data\n");
+        closesocket(sockfd);
+        freeaddrinfo(results);
+        return SEND_INTERNAL_ERROR;
     }
 
+    closesocket(sockfd);
+    freeaddrinfo(results);
+
+    return SEND_FILE;
+}
+
+int saveToFile(char *name, char *content){
+
+    // open the directory to ensure it exists
+    DIR *folder = opendir("Files");
+    if (folder == NULL) {
+        perror("Error opening directory 'Files'");
+        return SEND_INTERNAL_ERROR; // return error if directory doesn't exist
+    }
+    closedir(folder); // close the directory
+
+    // build the full file path
+    char filepath[1028];
+    snprintf(filepath, sizeof(filepath), "Files/%s.txt", name);
+    // open the file for writing
+    FILE *file = fopen(filepath, "w");
+    if (file == NULL) {
+        perror("Error opening file");
+        return SEND_INTERNAL_ERROR;
+    }
+
+    // write the content to the file
+    fprintf(file, "%s\n", content);
+    fclose(file); // close the file
+
+    printf("\nAdded new file to the server: %s.txt\n", name);
+    return SEND_FILE;
 }
 
 
@@ -730,7 +777,7 @@ void sendMessage(int index) {
         // send message
         bytesSent = send(msgSocket, sockets[index].buffer, strlen(sockets[index].buffer), 0);
 
-    }else if (sockets[index].sendSubType == SEND_DIRECTORY_NOT_FOUND) {
+    }else if (sockets[index].sendSubType == SEND_INTERNAL_ERROR) {
 
         const char *body = "Error reading file";
         strcpy(sockets[index].buffer, body);
@@ -767,11 +814,11 @@ void sendMessage(int index) {
 
 
 
-    printf("Files Server: Sent: %d\\%d bytes of %s \n****END OF SENT MESSAGE.****\n", bytesSent, strlen(sockets[index].buffer), sockets[index].buffer);
+    printf("Files Server: Sent: %d\\%d bytes of %s \n****END OF SENT MESSAGE.****\n", bytesSent, (int)strlen(sockets[index].buffer), sockets[index].buffer);
     QueryPerformanceCounter(&performanceCountEnd);
     duration = (double)(performanceCountEnd.QuadPart - lastRecvTracker[index].QuadPart) / frequency.QuadPart;
 
-    printf("RTT to process client request : (%.6f)\n", duration);
+    printf("RTT to process client request : (%.6f)\n\n", duration);
 
     // reset counter
     QueryPerformanceCounter(&lastRecvTracker[index]);
